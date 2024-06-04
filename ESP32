@@ -1,0 +1,231 @@
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <Arduino_JSON.h>
+#include <time.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+
+LiquidCrystal_I2C lcd(0x3F, 16, 2);
+
+#define CONNECTION_TIMEOUT 30
+//netwrok credentials
+const char* ssid     = "YOUR SSID";
+const char* password = "YOUR PASSWORD";
+const char* serverName_good = "http://192.168.189.171/MES_Dashboard/backend_Good.php";
+const char* serverName_bad = "http://192.168.189.171/MES_Dashboard/backend_Bad.php";
+
+const char* ntpServer = "pool.ntp.org";
+const long  gmtOffset_sec = 28800;
+const int   daylightOffset_sec = 3600;
+
+int timeout_counter = 0;
+
+unsigned long previousMillis = 0;
+unsigned long interval = 30000;
+
+char timeSecond[3];
+char timeMinutes[3];
+
+String faildata;
+String Gooddata;
+
+const int goodpin = 15;
+const int failpin = 2;
+const int goodled = 5;
+const int failled = 18;
+
+int good_signal_count = 0;
+int fail_signal_count = 0;
+
+int current_fail_state = 0;
+int current_good_state = 0;
+int previous_fail_state = 0;
+int previous_good_state = 0;
+
+String httpPOSTRequest_Good(const char* serverName, int GoodCount ) {
+  WiFiClient client;
+  HTTPClient http;
+  // Your IP address with path or Domain name with URL path 
+  http.begin(client,serverName);
+  // Send HTTP POST request
+  http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+  String httpRequestData = "GoodCount=" + String(GoodCount);
+  int httpResponseCode = http.POST(httpRequestData);
+
+  String payload = "{}"; 
+
+  if (httpResponseCode>0) {
+    Serial.print("HTTP Response code: ");
+    Serial.println(httpResponseCode);
+    payload = http.getString();
+    Serial.println(payload);
+  }
+  else {
+    Serial.print("Error code: ");
+    Serial.println(httpResponseCode);
+  }
+  // Free resources
+  http.end();
+
+  return payload;
+}
+
+String httpPOSTRequest_Bad(const char* serverName, int BadCount ) {
+  WiFiClient client;
+  HTTPClient http;
+  http.begin(client,serverName);
+  http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+  String httpRequestData = "BadCount=" + String(BadCount);
+  int httpResponseCode = http.POST(httpRequestData);
+
+  String payload = "{}"; 
+
+  if (httpResponseCode>0) {
+    Serial.print("HTTP Response code: ");
+    Serial.println(httpResponseCode);
+    payload = http.getString();
+  }
+  else {
+    Serial.print("Error code: ");
+    Serial.println(httpResponseCode);
+  }
+  http.end();
+
+  return payload;
+}
+
+void printLocalTime(){
+  struct tm timeinfo;
+  if(!getLocalTime(&timeinfo)){
+    Serial.println("Failed to obtain time");
+    return;
+  }
+  strftime(timeSecond,3, "%S", &timeinfo);
+  strftime(timeMinutes,3, "%M", &timeinfo);
+}
+
+void initWiFi() {
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting to WiFi ..");
+  while (WiFi.status() != WL_CONNECTED) {
+    Serial.print('.');
+    lcd.setCursor(2,0);   
+    lcd.print("CONNECTING");
+    delay(1000);
+    timeout_counter++;
+    if(timeout_counter >= CONNECTION_TIMEOUT){
+      ESP.restart();
+      lcd.setCursor(2,0);   
+      lcd.print("RESTARTING");
+    }
+  }
+  Serial.println(WiFi.localIP());
+  lcd.setCursor(2,0);   
+  lcd.print(" CONNECTED  ");
+}
+
+void setup() {
+  
+  Serial.begin(115200);
+  lcd.init();
+  lcd.clear();         
+  lcd.backlight(); 
+  initWiFi();
+  Serial.print("RRSI: ");
+  Serial.println(WiFi.RSSI());
+  Serial.println("WiFi Connected");
+  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+  printLocalTime();
+  pinMode(goodpin, INPUT_PULLDOWN);
+  pinMode(failpin, INPUT_PULLDOWN);
+  pinMode(goodled, OUTPUT);
+  pinMode(failled, OUTPUT);
+  
+}
+
+void dataAcquisition(){
+  current_good_state = digitalRead(goodpin);
+  current_fail_state = digitalRead(failpin);
+  
+    if (current_fail_state != previous_fail_state) {
+      // if the state has changed, increment the counter
+      if (current_fail_state == HIGH) {
+        // if the current state is HIGH then the button went from off to on:
+        fail_signal_count++;
+        digitalWrite(failled, HIGH);
+        Serial.println("on");
+        Serial.print("number of button pushes for fail: ");
+        Serial.println(fail_signal_count);
+        faildata = httpPOSTRequest_Bad(serverName_bad, fail_signal_count);
+        JSONVar myobject = JSON.parse(faildata);
+        if (JSON.typeof(myobject) == "undefined") {
+          Serial.println("Parsing input failed!");
+          return;
+        }
+        Serial.println(myobject);
+      } else {
+        // if the current state is LOW then the button went from on to off:
+        Serial.println("off");
+      }
+      // Delay a little bit to avoid bouncing
+      delay(50);
+    }
+    previous_fail_state = current_fail_state;
+
+    if (current_good_state != previous_good_state) {
+      if (current_good_state == HIGH) {
+        good_signal_count++;
+        digitalWrite(goodled, HIGH);
+        Serial.println("on");
+        Serial.print("number of button pushes for good: ");
+        Serial.println(good_signal_count);
+        Gooddata = httpPOSTRequest_Good(serverName_good, good_signal_count);
+        JSONVar myobject = JSON.parse(Gooddata);
+        if (JSON.typeof(myobject) == "undefined") {
+          Serial.println("Parsing input failed!");
+          return;
+        }
+        Serial.println(myobject);
+      } else {
+        Serial.println("off");
+      }
+      delay(50);
+    }
+  previous_good_state = current_good_state;
+
+  struct tm timeinfo;
+  if(!getLocalTime(&timeinfo)){
+    Serial.println("Failed to obtain time");
+    return;
+  }
+  strftime(timeSecond,3, "%S", &timeinfo);
+  strftime(timeMinutes,3, "%M", &timeinfo);
+
+  if(timeSecond == "59" && timeMinutes == "59"){
+    good_signal_count = 0;
+    fail_signal_count = 0;
+  }
+
+}
+
+
+void loop() {
+
+  unsigned long currentMillis = millis();
+  // if WiFi is down, try reconnecting every CHECK_WIFI_TIME seconds
+  if ((WiFi.status() != WL_CONNECTED) && (currentMillis - previousMillis >=interval)) {
+    Serial.print(millis());
+    Serial.println("Reconnecting to WiFi...");
+    WiFi.disconnect();
+    WiFi.reconnect();
+    ESP.restart();
+    previousMillis = currentMillis;
+
+  }else if(WiFi.status()==WL_CONNECTED){
+
+    dataAcquisition();
+    
+
+  }
+}
